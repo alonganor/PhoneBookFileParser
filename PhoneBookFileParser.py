@@ -1,8 +1,7 @@
+import csv
 import os
 import time
 from imghdr import tests as file_type_testers
-import csv
-import copy
 
 
 def read(path):
@@ -11,7 +10,7 @@ def read(path):
 
 
 def write(path, txt):
-    with open(path, 'ab') as ref:
+    with open(path, 'wb') as ref:
         ref.write(txt)
 
 
@@ -44,13 +43,6 @@ class PhoneBookFileParser(object):
                 field_value_length = int(byte_stream[ptr: ptr + cls.STRING_LENGTH_HEX_DIGIT_COUNT], 16)
                 ptr += cls.STRING_LENGTH_HEX_DIGIT_COUNT
 
-                # In case two contacts hold the same phone number - such as 0x5159 and 0x5A3F
-                additional_contact_ids = []
-                while field_value_length in contact_id_to_record_dict.keys():
-                    additional_contact_ids.append(field_value_length)
-                    field_value_length = int(byte_stream[ptr: ptr + cls.STRING_LENGTH_HEX_DIGIT_COUNT], 16)
-                    ptr += cls.STRING_LENGTH_HEX_DIGIT_COUNT
-
                 field_value = byte_stream[ptr: ptr + field_value_length]
                 ptr += field_value_length
 
@@ -73,7 +65,7 @@ class PhoneBookFileParser(object):
     @classmethod
     def correct_value_for_insert(cls, field_name, field_value, curr_value=None):
         field_name_to_return_value = {
-            "first_name": lambda value, current: value.split('\xa0'), # In case of family members who has the same record but a different first name
+            "first_name": lambda value, current: value.replace('\xa0', ' '), # Replace 'Non-breaking space' with regular space
             "last_name": lambda value, current: value,
             "phone_number": lambda value, current: [value] if curr_value is None else current + [value], # In case of multiple phone numbers
             "timestamp": lambda value, current: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(value))),
@@ -87,21 +79,11 @@ class PhoneBookFileParser(object):
         csv_writer = csv.DictWriter(file_obj, cls.FIELD_NAMES.values())
         csv_writer.writeheader()
         for contact in phone_book_dict:
-            all_contact_dicts = []
-
             # In case a person has more then one phone number
             if "phone_number" in contact:
                 contact["phone_number"] = " || ".join(contact["phone_number"])
 
-            # In case there are family members under the same contact
-            if "first_name" in contact:
-                for first_name in contact["first_name"]:
-                    new_dict = copy.deepcopy(contact)
-                    new_dict["first_name"] = first_name
-                    all_contact_dicts.append(new_dict)
-
-            for contact_details in all_contact_dicts:
-                csv_writer.writerow(contact_details)
+            csv_writer.writerow(contact)
 
     @classmethod
     def export_image(cls, encoded_byte_stream, output_folder_path, contact_id):
@@ -130,7 +112,9 @@ def main(file_path):
     phone_book_dict = PhoneBookFileParser.parse(file_path, output_folder)
     out_name = os.path.basename(file_path)
     out_name = out_name[:out_name.rfind('.')] + "_output.csv"
-    PhoneBookFileParser.export_to_csv(phone_book_dict, output_folder + out_name)
+    out_path = os.path.join(output_folder, out_name)
+    if not os.path.exists(out_path):
+        PhoneBookFileParser.export_to_csv(phone_book_dict, out_path)
 
 
 if __name__ == '__main__':
