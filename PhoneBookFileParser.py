@@ -21,7 +21,7 @@ class PhoneBookFileParser(object):
     STRING_LENGTH_HEX_DIGIT_COUNT = 4
     FIELD_NAMES = {0x86B7: "first_name",
                    0x9E60: "last_name",
-                   0x5159: "phone_number",
+                   0x5159: "phone_number", # this identifier also appears as a contact id. I'm assuming that since the phone number chunk has to have a type, the same identifier is being used in both cases.
                    0xD812: "timestamp",
                    0x6704: "image"}
 
