@@ -1,17 +1,25 @@
-from PhoneBookFile import *
+import os
 import time
+from imghdr import tests as file_type_testers
+import csv
+import copy
 
 
 def read(path):
     with open(path, 'r') as ref:
-        return ref.read()
+        return ref.read().split("\n")
+
+
+def write(path, txt):
+    with open(path, 'ab') as ref:
+        ref.write(txt)
 
 
 class PhoneBookFileParser(object):
-    PART_TYPE_BYTE_COUNT = 2
-    ID_BYTE_COUNT = 2
-    SEPARATOR_LENGTH = 1
-    STRING_LENGTH_BYTE_COUNT = 2
+    DATA_CHUNK_TYPE_HEX_DIGIT_COUNT = 4
+    ID_HEX_DIGIT_COUNT = 4
+    BUFFER_HEX_DIGIT_COUNT = 1
+    STRING_LENGTH_HEX_DIGIT_COUNT = 4
     FIELD_NAMES = {0x86B7: "first_name",
                    0x9E60: "last_name",
                    0x5159: "phone_number",
@@ -19,58 +27,110 @@ class PhoneBookFileParser(object):
                    0x6704: "image"}
 
     @classmethod
-    def parse(cls, x_file_path):
-        x_file_bytes_stream = read(x_file_path)
-        x_file_bytes_streams = x_file_bytes_stream.split("\n")
-        contacts_information = cls.parse_byte_streams(x_file_bytes_streams)
-        return PhoneBookFile(contacts_information)
-
-    @classmethod
-    def parse_byte_streams(cls, byte_streams):
+    def parse(cls, phone_book_file_path, output_folder_path):
+        phone_book_byte_streams = read(phone_book_file_path)
         contact_id_to_record_dict = {}
-        for byte_stream in byte_streams:
+        # The data of this format is divided into chunks that each has a unique meaning(I.E phone number, last name...)
+        for byte_stream in phone_book_byte_streams:
             ptr = 0
-            byte_stream_data_type = int(byte_stream[ptr: ptr + cls.PART_TYPE_BYTE_COUNT * 2], 16)
+            byte_stream_data_type = int(byte_stream[ptr: ptr + cls.DATA_CHUNK_TYPE_HEX_DIGIT_COUNT], 16)
             field_name = cls.FIELD_NAMES[byte_stream_data_type]
-            ptr += cls.PART_TYPE_BYTE_COUNT * 2
+            ptr += cls.DATA_CHUNK_TYPE_HEX_DIGIT_COUNT
             while ptr < len(byte_stream):
-                contact_id = int(byte_stream[ptr: ptr + cls.ID_BYTE_COUNT * 2], 16)
-                ptr += cls.ID_BYTE_COUNT * 2
+                contact_id = int(byte_stream[ptr: ptr + cls.ID_HEX_DIGIT_COUNT], 16)
+                ptr += cls.ID_HEX_DIGIT_COUNT
+                ptr += cls.BUFFER_HEX_DIGIT_COUNT
 
-                ptr += cls.SEPARATOR_LENGTH
+                field_value_length = int(byte_stream[ptr: ptr + cls.STRING_LENGTH_HEX_DIGIT_COUNT], 16)
+                ptr += cls.STRING_LENGTH_HEX_DIGIT_COUNT
 
-                field_value_length = int(byte_stream[ptr: ptr + cls.STRING_LENGTH_BYTE_COUNT * 2], 16)
-                ptr += cls.STRING_LENGTH_BYTE_COUNT * 2
+                # In case two contacts hold the same phone number - such as 0x5159 and 0x5A3F
+                additional_contact_ids = []
+                while field_value_length in contact_id_to_record_dict.keys():
+                    additional_contact_ids.append(field_value_length)
+                    field_value_length = int(byte_stream[ptr: ptr + cls.STRING_LENGTH_HEX_DIGIT_COUNT], 16)
+                    ptr += cls.STRING_LENGTH_HEX_DIGIT_COUNT
 
                 field_value = byte_stream[ptr: ptr + field_value_length]
                 ptr += field_value_length
 
                 if contact_id not in contact_id_to_record_dict:
-                    contact_id_to_record_dict[contact_id] = ContactInformation(contact_id)
+                    contact_id_to_record_dict[contact_id] = {}
 
-                contact_id_to_record_dict[contact_id] = cls.set_property(field_name,
-                                                                         field_value,
-                                                                         contact_id_to_record_dict[contact_id])
+                if field_name == "image":
+                    field_value = cls.export_image(field_value,
+                                                   output_folder_path,
+                                                   str(contact_id))
+
+                current = None
+                if field_name in contact_id_to_record_dict[contact_id]:
+                    current = contact_id_to_record_dict[contact_id][field_name]
+
+                contact_id_to_record_dict[contact_id][field_name] = cls.correct_value_for_insert(field_name, field_value, current)
 
         return contact_id_to_record_dict.values()
 
-    @staticmethod
-    def set_property(field_name, field_value, contact):
-        if field_name == "first_name":
-            contact.first_name = field_value
-        elif field_name == "last_name":
-            contact.last_name = field_value
-        elif field_name == "phone_number":
-            contact.phone_number = field_value
-        elif field_name == "timestamp":
-            contact.timestamp = time.gmtime(int(field_value))
-        elif field_name == "image":
-            contact.image = field_value.decode("base64")
-        return contact
+    @classmethod
+    def correct_value_for_insert(cls, field_name, field_value, curr_value=None):
+        field_name_to_return_value = {
+            "first_name": lambda value, current: value.split('\xa0'), # In case of family members who has the same record but a different first name
+            "last_name": lambda value, current: value,
+            "phone_number": lambda value, current: [value] if curr_value is None else current + [value], # In case of multiple phone numbers
+            "timestamp": lambda value, current: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(value))),
+            "image": lambda value, current: value
+        }
+        return field_name_to_return_value[field_name](field_value, curr_value)
+
+    @classmethod
+    def export_to_csv(cls, phone_book_dict, export_path):
+        file_obj = open(export_path, 'a')
+        csv_writer = csv.DictWriter(file_obj, cls.FIELD_NAMES.values())
+        csv_writer.writeheader()
+        for contact in phone_book_dict:
+            all_contact_dicts = []
+
+            # In case a person has more then one phone number
+            if "phone_number" in contact:
+                contact["phone_number"] = " || ".join(contact["phone_number"])
+
+            # In case there are family members under the same contact
+            if "first_name" in contact:
+                for first_name in contact["first_name"]:
+                    new_dict = copy.deepcopy(contact)
+                    new_dict["first_name"] = first_name
+                    all_contact_dicts.append(new_dict)
+
+            for contact_details in all_contact_dicts:
+                csv_writer.writerow(contact_details)
+
+    @classmethod
+    def export_image(cls, encoded_byte_stream, output_folder_path, contact_id):
+        byte_stream = encoded_byte_stream.decode("base64")
+        phone_book_images_folder = os.path.join(output_folder_path, "profile_images")
+        if not os.path.exists(phone_book_images_folder):
+            os.mkdir(phone_book_images_folder)
+        file_name = contact_id + "." + cls.get_file_type(byte_stream)
+        out_file_path = os.path.join(phone_book_images_folder, file_name)
+        write(out_file_path, byte_stream)
+        return out_file_path
+
+    @classmethod
+    def get_file_type(cls, byte_stream):
+        header = byte_stream[:32]
+        for t in file_type_testers:
+            res = t(header, None)
+            if res:
+                return res
 
 
 def main(file_path):
-    phone_book = PhoneBookFileParser.parse(file_path)
+    output_folder = file_path[:file_path.rfind('.')] + "_output"
+    if not os.path.exists(output_folder):
+        os.mkdir(output_folder)
+    phone_book_dict = PhoneBookFileParser.parse(file_path, output_folder)
+    out_name = os.path.basename(file_path)
+    out_name = out_name[:out_name.rfind('.')] + "_output.csv"
+    PhoneBookFileParser.export_to_csv(phone_book_dict, output_folder + out_name)
 
 
 if __name__ == '__main__':
